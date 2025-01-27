@@ -2,12 +2,33 @@
 #include <thread>
 #include <string>
 #include <cstring>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <arpa/inet.h> 
 
 const std::string SERVER_IP = "127.0.0.1"; // Localhost
 const int PORT = 8080;
+
+// Function to get terminal width
+int getTerminalWidth() {
+    struct winsize w;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+    return w.ws_col;
+}
+
+void clearLastInput(const std::string& input) {
+    // Calculate the number of terminal lines the input spans
+    const int terminalWidth = getTerminalWidth(); // Adjust for actual terminal width
+    int lines = (input.length() / terminalWidth) + 1;
+
+    // Move the cursor up and clear lines
+    for (int i = 0; i < lines; ++i) {
+        std::cout << "\033[F" // Move cursor up one line
+                  << "\033[2K"; // Clear the current line
+    }
+    std::flush(std::cout); // Ensure changes take effect
+}
 
 void receiveMessages(int socket) {
     char buffer[1024];
@@ -19,7 +40,7 @@ void receiveMessages(int socket) {
             break;
         }
 
-        std::cout << "Message: " << std::string(buffer, bytesReceived) << std::endl;
+        std::cout << std::string(buffer, bytesReceived) << std::endl;
     }
 }
 
@@ -48,9 +69,10 @@ int main() {
     while (true) {
         std::string message;
         std::getline(std::cin, message);
-        if (message == "exit") {
+        if (message == "/exit") {
             break;
         }
+        clearLastInput(message);
         send(clientSocket, message.c_str(), message.size(), 0);
     }
 
