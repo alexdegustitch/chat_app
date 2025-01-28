@@ -1,3 +1,5 @@
+#ifndef CONNECTION_POOL_H
+#define CONNECTION_POOL_H
 #include <iostream>
 #include <pqxx/pqxx>
 #include <queue>
@@ -35,3 +37,5 @@ public:
         condVar.notify_one();
     }
 };
+
+#endif
