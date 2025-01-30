@@ -7,7 +7,9 @@ private:
     State state;
     std::string name;
     int id_room;
+    int userType;
     int id_user;
+    std::string username;
 public:
     UserState(State s){
         state = s;
@@ -16,6 +18,23 @@ public:
     UserState(){
         state = State::INCORRECT_COMMAND;
     }
+
+    std::string getUsername(){
+        return username;
+    }
+
+    void setUsername(std::string username){
+        this->username = username;
+    }
+
+    void setUserType(int userType){
+        this->userType = userType;
+    }
+
+    int getUserType(){
+        return this->userType;
+    }
+    
     int getIdUser(){
         return id_user;
     }

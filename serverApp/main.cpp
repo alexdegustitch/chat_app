@@ -2,6 +2,7 @@
 #include <csignal>
 #include <thread>
 #include <vector>
+#include <unordered_set>
 #include <string>
 #include <cstring>
 #include <netinet/in.h>
@@ -17,6 +18,7 @@
 const int PORT = 8080;
 
 std::map<int, UserState> clients; // Store client sockets
+std::unordered_set<int> guestCodes;
 
 void handleResize(int signal) {
     if (signal == SIGWINCH) {
@@ -24,6 +26,24 @@ void handleResize(int signal) {
         ioctl(STDOUT_FILENO, TIOCGWINSZ, &w); // Get new terminal size
         std::cout << "Terminal resized: " << w.ws_row << " rows, " << w.ws_col << " cols" << std::endl;
     }
+}
+
+std::string generateHashCode(std::string name){
+    std::hash<std::string> hashFun;
+    size_t hashedName = hashFun(name);
+
+    std::stringstream str;
+    str << std::hex << hashedName;
+
+    std::string hashStr = str.str();
+
+    if(hashStr.size() > 4){
+        hashStr = hashStr.substr(0, 4);
+    }else{
+        hashStr = std::string(4 - hashStr.size(), '0');
+    }
+
+    return hashStr;
 }
 
 std::string formatTimestamp(const std::string &postgresTimestamp) {
@@ -98,6 +118,41 @@ std::string formatMessage(const std::string &username, const std::string &messag
     return formattedMessage.str();
 }
 
+void listMessages(std::string roomName, ConnectionPool &pool, std::string &message, bool ok, int clientSocket){
+    std::string hashedRoomName = roomName;
+    int idRoom;
+    auto conn = pool.getConnection();
+    pqxx::work txn(*conn);
+    pqxx::result res = txn.exec("SELECT id_room, name FROM room where hashed_name = " + txn.quote(hashedRoomName));
+    pool.releaseConnection(std::move(conn));
+    if(ok && res.empty()){
+        message = "No rome with that ID";
+        ok = false;
+    }else{
+        idRoom = std::stoi(res[0]["id_room"].c_str());
+    }
+    if(ok && idRoom != clients[clientSocket].getRoom()){ 
+        std::string user = clients[clientSocket].getName();
+        std::string welcomeMessage = "Hello " + user + "! Welcome to the room " + std::string(res[0]["name"].c_str()) + "\n\n";
+        send(clientSocket, welcomeMessage.c_str(), welcomeMessage.size(), 0);
+        conn = pool.getConnection();
+        res = txn.exec("SELECT * FROM(SELECT * FROM message WHERE id_room = "  + txn.quote(idRoom) + " order by timestamp_message desc limit 5) temp order by timestamp_message asc");
+        for(const auto &row: res){
+            std::string formattedMessage = formatMessage(row["username"].c_str(), row["text_message"].c_str(), row["timestamp_message"].c_str());
+            send(clientSocket, formattedMessage.c_str(), formattedMessage.size(), 0);
+        }
+        clients[clientSocket].setRoom(idRoom);
+        pool.releaseConnection(std::move(conn)); 
+
+        for(auto it = clients.begin(); it != clients.end(); ++it){
+            if(it->first != clientSocket && it->second.getRoom() == idRoom){
+                std::string userJoinedMessage = "User " + user + " joined!";
+                send(it->first, userJoinedMessage.c_str(), userJoinedMessage.size(), 0);
+            }
+        }       
+    }
+}
+
 void handleClient(ConnectionPool &pool, int clientSocket) {
     char buffer[1024];
     while (true) {
@@ -120,8 +175,11 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
         if(command.length() > 0 && command[0] == '/'){
             command = command.substr(1);
             std::string argument = (pos == std::string::npos) ? "" : input.substr(pos + 1);
-
+            //std::cout << "S: " << "C:"<<command <<std::endl;
             if(StateMachine::transition(clients[clientSocket].getState(), command) == State::INCORRECT_COMMAND){
+                //std::cout << "S: " <<StateMachine::transition(clients[clientSocket].getState(), command) << "C:"<<command <<std::endl;
+                message = "Incorrect command!";
+                send(clientSocket, message.data(), message.size(), 0);
                 continue;
             }
             bool ok = true;
@@ -134,9 +192,30 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
                     std::random_device rd;
                     std::mt19937 gen(rd());
                     std::uniform_int_distribution<> distrib(1, 1000);
-                    std::string name = "guest" + std::to_string(distrib(gen));
+                    
+                    int rnd = distrib(gen);
+                    while(guestCodes.count(rnd) > 0){
+                        rnd = distrib(gen);
+                    }
+                    guestCodes.insert(rnd);
+                    clients[clientSocket].setIdUser(rnd);
+                    std::string name = "guest" + std::to_string(rnd);
                     clients[clientSocket].setName(name);
-                    message = "Hello " + name + "!";
+                    clients[clientSocket].setUserType(0);
+                    // message = "Hello " + name + "! You are in the General Talk room\n\n";
+                    auto conn = pool.getConnection();
+                    pqxx::work tnx(*conn);
+                    pqxx::result res = tnx.exec("SELECT hashed_name FROM room where id_room = 1");
+                    pool.releaseConnection(std::move(conn));
+                    listMessages(res[0]["hashed_name"].c_str(), pool, message, ok, clientSocket);
+                }
+            }else if(command == "login"){
+                if(argument != ""){
+                    message = "Too many arguments";
+                    ok = false;
+                }
+                if(ok){
+                    message = "Enter a username:";
                 }
             }else if(command == "rooms"){
                 if(argument != ""){
@@ -150,7 +229,7 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
                     txn.commit();
 
                     for(const auto &row: res){
-                        std::string formattedMessage = std::string(row["name"].c_str()) + "\n";
+                        std::string formattedMessage = std::string(row["name"].c_str()) + " " + std::string(row["hashed_name"].c_str()) + "\n";
                         send(clientSocket, formattedMessage.c_str(), formattedMessage.size(), 0);
                     }
 
@@ -158,37 +237,56 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
                 }   
             }else if(command == "room"){     
                 if(argument == ""){
-                    message = "Room name required!";
+                    message = "Room ID required!";
                     ok = false;
                 }
-                pos = argument.find(' ');
+                pos = ok ? argument.find(' ') : std::string::npos;
                 if(pos != std::string::npos){
                     message = "Too many arguments!";
                     ok = false;
                 }
-                std::string roomName = argument;
-                std::transform(roomName.begin(), roomName.end(), roomName.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-                int idRoom;
-                auto conn = pool.getConnection();
-                pqxx::work txn(*conn);
-                pqxx::result res = txn.exec("SELECT id_room FROM room where LOWER(name) = " + txn.quote(roomName));
-                pool.releaseConnection(std::move(conn));
-                if(res.empty()){
-                    message = "No rome with that name";
+                listMessages(argument, pool, message, ok, clientSocket);
+            }else if(command == "logout"){
+                if(argument != ""){
+                    message = "Too many arguments";
                     ok = false;
-                }else{
-                    idRoom = std::stoi(res[0]["id_room"].c_str());
                 }
-                if(ok && idRoom != clients[clientSocket].getRoom()){ 
-                    conn = pool.getConnection();
-                    res = txn.exec("SELECT * FROM(SELECT * FROM message WHERE id_room = "  + txn.quote(idRoom) + " order by timestamp_message desc limit 5) temp order by timestamp_message asc");
-                    for(const auto &row: res){
-                        std::string formattedMessage = formatMessage(row["username"].c_str(), row["text_message"].c_str(), row["timestamp_message"].c_str());
-                        send(clientSocket, formattedMessage.c_str(), formattedMessage.size(), 0);
+                if(ok){
+                    clients[clientSocket].setIdUser(-1);
+                    clients[clientSocket].setName(nullptr);
+                    clients[clientSocket].setUserType(-1);
+                    clients[clientSocket].setName(nullptr);
+                }
+            }
+            else if(command == "back"){
+                if(argument != ""){
+                    message = "Too many arguments";
+                    ok = false;
+                }
+                if(ok){
+                    State currState = clients[clientSocket].getState();
+                    if(currState == State::GUEST_ROOM){
+                        clients[clientSocket].setRoom(1);
+                        auto conn = pool.getConnection();
+                        pqxx::work tnx(*conn);
+                        pqxx::result res = tnx.exec("SELECT hashed_name FROM room where id_room = 1");
+                        pool.releaseConnection(std::move(conn));
+                        listMessages(res[0]["hashed_name"].c_str(), pool, message, ok, clientSocket);
+                    }else if(currState == State::GUEST_GENERAL){
+                        guestCodes.erase(clients[clientSocket].getIdUser());
+                        clients[clientSocket].setName(nullptr);
+                        clients[clientSocket].setRoom(-1);
+                        clients[clientSocket].setIdUser(-1);
+                    }else if(currState == State::USER_ROOM){
+                        auto conn = pool.getConnection();
+                        pqxx::work tnx(*conn);
+                        pqxx::result res = tnx.exec("SELECT hashed_name FROM room where id_room = 1");
+                        pool.releaseConnection(std::move(conn));
+                        listMessages(res[0]["hashed_name"].c_str(), pool, message, ok, clientSocket);
+                        clients[clientSocket].setRoom(1);
+                    }else if(currState == State::USERNAME_LOGIN){
+                        clients[clientSocket].setName(nullptr);
                     }
-                    clients[clientSocket].setRoom(idRoom);
-                    pool.releaseConnection(std::move(conn));        
                 }
             }
             if(ok){
@@ -196,24 +294,63 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
             }
             send(clientSocket, message.data(), message.size(), 0);
         }else{
-            // Save a message
-            std::string user = clients[clientSocket].getName();
-            std::string message = input;
-            std::string currTime = getCurrentTime();
-            int idRoom = clients[clientSocket].getRoom();
+            bool ok = true;
+            // Check if a user is trying to sign in
+            if(clients[clientSocket].getState() == State::USERNAME_LOGIN){
+                clients[clientSocket].setName(input);
+                message = "Enter password: ";
+            }else if(clients[clientSocket].getState() == State::PASS_LOGIN){
+                auto conn = pool.getConnection();
+                pqxx::work tnx(*conn);
+                pqxx::result res = tnx.exec("SELECT password FROM users WHERE username = " + tnx.quote(clients[clientSocket].getName()));
+                
+                if(res.empty()){
+                    ok = false;
+                    message = "No user with a given username. Forwarded back to home!";
+                    clients[clientSocket].setState(State::START);
 
-            auto conn = pool.getConnection();
-            pqxx::work txn(*conn);
-            txn.exec("INSERT INTO message(text_message, timestamp_message, id_room, username) VALUES(" + txn.quote(message) + ", " + txn.quote(currTime) + ", " + txn.quote(idRoom) + ", " + txn.quote(user) + ")");
-            txn.commit();
-            pool.releaseConnection(std::move(conn));
+                }else if(res[0]["password"].c_str() != input){
+                    ok = false;
+                    message = "Incorrect password, try again!";
+                }
+                if(ok){
+                    // User automatically enters a General Talk room
+                    tnx.exec("UPDATE users SET active = TRUE WHERE username = " + tnx.quote(clients[clientSocket].getName()));
+                    tnx.commit();
+                    clients[clientSocket].setUserType(1);
+                    message = "Welcome " + clients[clientSocket].getName() + "!\nYou are in the General Talk room\n\n";
+                    auto conn = pool.getConnection();
+                    pqxx::work tnx(*conn);
+                    pqxx::result res = tnx.exec("SELECT hashed_name FROM room where id_room = 1");
+                    pool.releaseConnection(std::move(conn));
+                    listMessages(res[0]["hashed_name"].c_str(), pool, message, ok, clientSocket);
+                }
+                pool.releaseConnection(std::move(conn));
+            }else{
+                // Save a message
+                std::string user = clients[clientSocket].getName();
+                std::string message = input;
+                std::string currTime = getCurrentTime();
+                int idRoom = clients[clientSocket].getRoom();
 
-            message = formatMessage(user, message, currTime);
-            // Broadcast the message to all clients
-            for (auto it = clients.begin(); it != clients.end(); ++it) {
-                if(it->second.getRoom() == idRoom)
-                    send(it->first, message.data(), message.size(), 0);
+                auto conn = pool.getConnection();
+                pqxx::work txn(*conn);
+                txn.exec("INSERT INTO message(text_message, timestamp_message, id_room, username) VALUES(" + txn.quote(message) + ", " + txn.quote(currTime) + ", " + txn.quote(idRoom) + ", " + txn.quote(user) + ")");
+                txn.commit();
+                pool.releaseConnection(std::move(conn));
+
+                message = formatMessage(user, message, currTime);
+                // Broadcast the message to all clients
+                for (auto it = clients.begin(); it != clients.end(); ++it) {
+                    if(it->second.getRoom() == idRoom)
+                        send(it->first, message.data(), message.size(), 0);
+                }
+                continue;
             }
+            if(ok){
+                clients[clientSocket].setState(StateMachine::transition(clients[clientSocket].getState(), command));
+            }
+            send(clientSocket, message.data(), message.size(), 0);
         }
     }
 }

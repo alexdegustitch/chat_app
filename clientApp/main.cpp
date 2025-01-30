@@ -72,7 +72,8 @@ int main() {
         if (message == "/exit") {
             break;
         }
-        clearLastInput(message);
+        if(message.size() > 0 && message[0] != '/')
+            clearLastInput(message);
         send(clientSocket, message.c_str(), message.size(), 0);
     }
 
