@@ -132,8 +132,10 @@ void listMessages(std::string roomName, ConnectionPool &pool, std::string &messa
         idRoom = std::stoi(res[0]["id_room"].c_str());
     }
     if(ok && idRoom != clients[clientSocket].getRoom()){ 
+        std::cout << idRoom << ", " <<clients[clientSocket].getRoom() << ",  " << ok <<std::endl;
         std::string user = clients[clientSocket].getName();
-        std::string welcomeMessage = "Hello " + user + "! Welcome to the room " + std::string(res[0]["name"].c_str()) + "\n\n";
+        std::string welcomeMessage = "Welcome " + user + "! Welcome to the room " + std::string(res[0]["name"].c_str()) + "\n\n";
+        std::cout << user << ", " << std::string(res[0]["name"].c_str()) << ",  " << welcomeMessage <<std::endl;
         send(clientSocket, welcomeMessage.c_str(), welcomeMessage.size(), 0);
         conn = pool.getConnection();
         res = txn.exec("SELECT * FROM(SELECT * FROM message WHERE id_room = "  + txn.quote(idRoom) + " order by timestamp_message desc limit 5) temp order by timestamp_message asc");
@@ -286,6 +288,9 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
                         clients[clientSocket].setRoom(1);
                     }else if(currState == State::USERNAME_LOGIN){
                         clients[clientSocket].setName(nullptr);
+                    }else if(currState == State::PASS_LOGIN){
+                        //clients[clientSocket].setState(State::USERNAME_LOGIN);
+                        message = "Enter username: ";
                     }
                 }
             }
@@ -318,7 +323,7 @@ void handleClient(ConnectionPool &pool, int clientSocket) {
                     tnx.exec("UPDATE users SET active = TRUE WHERE username = " + tnx.quote(clients[clientSocket].getName()));
                     tnx.commit();
                     clients[clientSocket].setUserType(1);
-                    message = "Welcome " + clients[clientSocket].getName() + "!\nYou are in the General Talk room\n\n";
+                    //message = "Welcome " + clients[clientSocket].getName() + "!\nYou are in the General Talk room\n\n";
                     auto conn = pool.getConnection();
                     pqxx::work tnx(*conn);
                     pqxx::result res = tnx.exec("SELECT hashed_name FROM room where id_room = 1");

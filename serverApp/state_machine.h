@@ -40,8 +40,9 @@ public:
         case State::SIGN_UP_USERNAME:
             if(command == "back"){
                 return State::START;
+            }else{
+                return State::SIGN_UP_PASS1;
             }
-            return State::SIGN_UP_PASS1;
             break;
         case State::SIGN_UP_PASS1:
             return State::SIGN_UP_PASS2;
@@ -52,14 +53,16 @@ public:
         case State::USERNAME_LOGIN:
             if(command == "back"){
                 return State::START;
+            }else{
+                return State::PASS_LOGIN;
             }
-            return State::PASS_LOGIN;
             break;
         case State::PASS_LOGIN:
             if(command == "back"){
                 return State::USERNAME_LOGIN;
+            }else{
+                return State::USER_GENERAL;
             }
-            return State::USER_GENERAL;
             break;
         case State::GUEST_GENERAL:
             if(command == "room"){
@@ -120,7 +123,7 @@ public:
             }else if(command == "room"){
                 return currentState;
             }else if(command == "back"){
-            return State::USER_GENERAL;
+                return State::USER_GENERAL;
             }else{
                 return State::INCORRECT_COMMAND;
             }
